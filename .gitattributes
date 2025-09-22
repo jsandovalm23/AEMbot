@@ -1,0 +1,16 @@
+# Fuerza a usar LF en todos los archivos de código
+*.py text eol=lf
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Archivos de texto generales
+*.md text eol=lf
+*.txt text eol=lf
+
+# Mantener binarios intactos
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
