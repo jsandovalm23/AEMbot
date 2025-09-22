@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: aem-bot
+    name: aembot
     env: python
     plan: free
     autoDeploy: true
@@ -8,6 +8,8 @@ services:
     startCommand: bash -c "python -m src.main & python server.py"
     healthCheckPath: /healthz
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.13    
       # Render provee $PORT automáticamente al Web Service
       - key: PORT
         value: 10000
