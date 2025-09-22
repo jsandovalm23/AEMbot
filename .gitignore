@@ -1,0 +1,26 @@
+# Archivos de respaldo
+*.bak
+
+# Datos generados en runtime
+*.csv
+*.json
+
+# Scripts de desarrollo
+canvas.py
+dev_*.py
+commands.txt
+manual_draws.py
+
+# Cache de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Entornos virtuales (si algún día lo creas dentro)
+.env
+.env_example
+.venv/
+venv/
+Testing/
+tests/
