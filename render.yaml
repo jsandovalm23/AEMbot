@@ -1,45 +1,44 @@
 services:
-  - type: worker
-    name: aembot-worker
+  - type: web
+    name: aem-bot
     env: python
     plan: free
-    region: oregon   # cámbialo si prefieres otra región
-    buildCommand: |
-      pip install --upgrade pip && pip install -r requirements.txt
-    startCommand: |
-      python -m src.main
+    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    startCommand: bash -c "python -m src.main & python server.py"
+    healthCheckPath: /healthz
     envVars:
-      # --- Discord ---
+      # Render provee $PORT automáticamente al Web Service
+      - key: PORT
+        value: 10000
+
+      # === Variables de config (puedes cargarlas aquí o en el dashboard) ===
+      # Recomendado: BOT_TOKEN como Secret en el dashboard
       - key: BOT_TOKEN
-        sync: false    # para no subir el token al repo, lo metes manualmente en Render
+        fromSecret: BOT_TOKEN
+
       - key: GUILD_ID
         value: "1323744094832558111"
 
-      # --- Data dir ---
       - key: DATA_DIR
-        value: "/var/data"   # más seguro que ./data (persistente en Render)
+        value: "./data"
 
-      # --- Roles ---
       - key: ROLE_ADMIN
         value: "Admin,R5,R4,R4 Spanish,R4 Portuguese"
       - key: ROLE_OFFICIAL
         value: "R5,R4,R4 Spanish,R4 Portuguese"
 
-      # --- Announcements ---
       - key: ANNOUNCE_CHANNEL_ID
         value: "1360290285585961241"
       - key: ANNOUNCE_ENABLED
         value: "true"
 
-      # --- Game timing ---
       - key: GAME_CUTOVER_UTC
-        value: "2"
+        value: "2"  # 02:00 UTC
 
-      # --- VS rules ---
       - key: THRESHOLD
         value: "7200000"
 
-      # --- Automation toggles ---
       - key: AUTO_DRAW_D
         value: "true"
       - key: AUTO_DRAW_W
@@ -49,6 +48,5 @@ services:
       - key: AUTO_TRAIN_POST
         value: "true"
 
-      # --- Mentions urgent ---
       - key: MENTION_URGENT
         value: "<@&1323747046947033223> <@&1323747169429094560>"
