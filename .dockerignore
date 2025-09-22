@@ -1,0 +1,11 @@
+.git
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.bak
+*.csv
+*.json
+dev_*.py
+data/
