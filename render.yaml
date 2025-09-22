@@ -1,54 +1,36 @@
 services:
   - type: web
     name: aembot
-    env: python
     plan: free
     autoDeploy: true
-    buildCommand: pip install -r requirements.txt
-    startCommand: bash -c "python -m src.main & python server.py"
+    dockerfilePath: ./Dockerfile
     healthCheckPath: /healthz
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.10.13    
-      # Render provee $PORT automáticamente al Web Service
-      - key: PORT
-        value: 10000
-
-      # === Variables de config (puedes cargarlas aquí o en el dashboard) ===
-      # Recomendado: BOT_TOKEN como Secret en el dashboard
       - key: BOT_TOKEN
-        fromSecret: BOT_TOKEN
-
+        sync: true
       - key: GUILD_ID
-        value: "1323744094832558111"
-
+        sync: true
       - key: DATA_DIR
-        value: "./data"
-
-      - key: ROLE_ADMIN
-        value: "Admin,R5,R4,R4 Spanish,R4 Portuguese"
-      - key: ROLE_OFFICIAL
-        value: "R5,R4,R4 Spanish,R4 Portuguese"
-
+        sync: true
       - key: ANNOUNCE_CHANNEL_ID
-        value: "1360290285585961241"
+        sync: true
       - key: ANNOUNCE_ENABLED
-        value: "true"
-
+        sync: true
       - key: GAME_CUTOVER_UTC
-        value: "2"  # 02:00 UTC
-
+        sync: true
       - key: THRESHOLD
-        value: "7200000"
-
+        sync: true
       - key: AUTO_DRAW_D
-        value: "true"
+        sync: true
       - key: AUTO_DRAW_W
-        value: "true"
+        sync: true
       - key: AUTO_VS_REMINDER
-        value: "true"
+        sync: true
       - key: AUTO_TRAIN_POST
-        value: "true"
-
+        sync: true
+      - key: ROLE_ADMIN
+        sync: true
+      - key: ROLE_OFFICIAL
+        sync: true
       - key: MENTION_URGENT
-        value: "<@&1323747046947033223> <@&1323747169429094560>"
+        sync: true

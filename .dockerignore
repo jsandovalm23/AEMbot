@@ -1,0 +1,17 @@
+.git
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.bak
+*.tmp
+.env
+.env.*
+/data/*
+!data/.keep
+*.csv
+*.json
+dev_*.py
+.DS_Store
