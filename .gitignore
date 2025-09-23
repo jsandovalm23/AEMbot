@@ -23,5 +23,6 @@ aembot.service
 .env_example
 .venv/
 venv/
+pro/
 Testing/
 tests/
