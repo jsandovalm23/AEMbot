@@ -2,7 +2,7 @@
 # src/commands/draw.py  (W and D)
 # ===============================
 import random
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone, time
 import discord
 from discord import app_commands
 from ..config import ROLE_ADMIN, ROLE_OFFICIAL, THRESHOLD
@@ -15,12 +15,21 @@ from ..utils.date_utils import (
     game_week_monfri,
 )
 from ..utils.csv_utils import append_sorteo
-from ..storage import weekly_summary
+from ..storage import weekly_summary, get_train_config
+
+UTC = timezone.utc
 
 
 def has_role(member: discord.Member) -> bool:
     names = {r.name for r in getattr(member, "roles", [])}
     return any(r in names for r in ROLE_ADMIN + ROLE_OFFICIAL)
+
+
+# ---------- helper: exclude drivers from pool ----------
+def _exclude_train_drivers(pool: list[str]) -> list[str]:
+    train_cfg = get_train_config()
+    drivers = {d.lower() for d in train_cfg.get("drivers", []) if d and d.strip()}
+    return [p for p in pool if p.lower() not in drivers]
 
 
 @app_commands.command(name="draw", description="Alliance draws: D (daily) or W (weekly)")
@@ -40,10 +49,6 @@ async def draw(interaction: discord.Interaction, kind: app_commands.Choice[str])
 
 
 # ---------- Draw D (daily) — previous game-day elegibles → next assignment ----------
-# Rules:
-# - If previous game-day is MON–FRI → assign for the next day (TUE–SAT).
-# - If previous game-day is SAT → assign for MONDAY of the next week.
-# - If previous is SUN → not applicable.
 async def draw_d(interaction: discord.Interaction):
     now_dt = now_utc()
     current_gd = to_game_date(now_dt)
@@ -56,14 +61,17 @@ async def draw_d(interaction: discord.Interaction):
         )
 
     week_dt = from_game_date(base_gd)
-    summary = weekly_summary(week_dt)
+    summary = weekly_summary()
+
     day_key = yyyymmdd_from_date(base_gd)
-    eligibles = list(set(summary.get("perDay", {}).get(day_key, {}).get("eligible", [])))
+    eligibles = list(set(summary.get("eligibles_by_day", {}).get(day_key, [])))
+
+    # 🚫 excluir nombres de train
+    eligibles = _exclude_train_drivers(eligibles)
 
     if not eligibles:
         return await interaction.response.send_message("No eligibles (≥ 7.2M) in the previous game-day.")
 
-    # Determine target day: next day, except SAT → MON
     if base_wd == 6:  # Saturday
         applies_for_gd = base_gd + timedelta(days=2)  # Monday
     else:
@@ -74,7 +82,13 @@ async def draw_d(interaction: discord.Interaction):
     backups = eligibles[1:3]
 
     detail = f"D|for:{yyyymmdd_from_date(applies_for_gd)}|passenger:{passenger}|backups:{','.join(backups)}"
-    append_sorteo(week_dt, "D", detail)
+
+    if isinstance(week_dt, datetime):
+        week_dt_dt = week_dt
+    else:
+        week_dt_dt = datetime.combine(week_dt, time(0, 0, tzinfo=UTC))
+
+    append_sorteo(week_dt_dt, "D", detail)
 
     human_day = from_game_date(applies_for_gd)
     await interaction.response.send_message(
@@ -89,15 +103,17 @@ async def draw_w(interaction: discord.Interaction):
     now_dt = now_utc()
     current_gd = to_game_date(now_dt)
 
-    # Only when event is over → on game Sunday
     if current_gd.isoweekday() != 7:
         return await interaction.response.send_message(
             "**Draw W** can only be executed **after the event ends** (game Sunday).",
             ephemeral=True,
         )
 
-    summary = weekly_summary(from_game_date(current_gd))
-    pool = [name for name, v in summary.get("averages", {}).items() if v.get("average", 0) >= THRESHOLD]
+    summary = weekly_summary()
+    pool = [name for name, avg in summary.get("averages", {}).items() if avg >= THRESHOLD]
+
+    # 🚫 excluir nombres de train
+    pool = _exclude_train_drivers(pool)
 
     if len(pool) < 5:
         return await interaction.response.send_message("Not enough average-eligibles (≥ 7.2M) to assign 5 passengers.")
