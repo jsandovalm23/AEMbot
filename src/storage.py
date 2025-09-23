@@ -5,7 +5,7 @@
 from __future__ import annotations
 import json, os, csv
 from typing import Any, Dict, List, Tuple, Optional
-from datetime import datetime, timedelta, timezone, date
+from datetime import datetime, timedelta, timezone, date, time
 
 # Usa configuración centralizada
 from .config import DATA_DIR, THRESHOLD
@@ -201,7 +201,8 @@ def register_points(name: str, amount: int, day: str | None = None) -> Tuple[str
 
     # CSV: fecha_dia,nombre_comandante,puntos (se guarda el total)
     # OJO: append_registro espera una fecha (date/datetime), no un string.
-    append_registro(target, name, int(amount))
+    dt_utc = datetime.combine(target, time(0, 0, tzinfo=UTC))
+    append_registro(dt_utc, name, int(amount))
 
     return week_key, date_key, int(amount)
 
