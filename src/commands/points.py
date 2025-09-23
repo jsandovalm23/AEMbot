@@ -4,6 +4,7 @@
 import discord
 from discord import app_commands
 import logging
+from datetime import date, datetime
 
 from ..utils.date_utils import (
     now_utc,
@@ -35,6 +36,10 @@ async def points(interaction: discord.Interaction, name: str, amount: int, day: 
         else:
             gd = to_game_date(now_utc())
             when = from_game_date(gd)
+
+        # Normalizar: si alguna rama devuelve datetime, convertir a date
+        if isinstance(when, datetime):
+            when = when.date()
 
         if not is_game_mon_to_sat(when):
             return await interaction.response.send_message(
