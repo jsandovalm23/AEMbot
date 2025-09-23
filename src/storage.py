@@ -148,16 +148,16 @@ _DAY_OFFSETS = {
     "lun": 0, "mar": 1, "mie": 2, "mié": 2, "jue": 3, "vie": 4, "sab": 5, "sáb": 5,
 }
 
-def register_points(name: str, amount: int, day: str | None = None) -> Tuple[str, str]:
+def register_points(name: str, amount: int, day: str | None = None) -> Tuple[str, str, int]:
     """
     Registra puntos para un jugador en la semana ISO actual (modelo de juego).
     - name: nombre del jugador (del juego)
-    - amount: puntos enteros
+    - amount: puntos enteros (se guarda como TOTAL del día)
     - day: opcional ('mon'..'sat' o abreviatura ES). Si None, usa el día de juego actual.
     Reglas:
       * El evento VS corre de lun–sáb. El domingo puede registrar para lun–sáb de la semana actual.
       * Siempre se registra en la semana ISO actual (lunes–domingo) usando calendario del juego (corte 02:00 UTC).
-    Devuelve (week_key, yyyymmdd_del_registro)
+    Devuelve (week_key, yyyymmdd_del_registro, total_del_dia)
     """
     if not isinstance(amount, int):
         raise ValueError("amount must be integer")
@@ -189,14 +189,20 @@ def register_points(name: str, amount: int, day: str | None = None) -> Tuple[str
 
     week_bucket = state["points"].setdefault(week_key, {})
     day_list: List[Dict[str, Any]] = week_bucket.setdefault(date_key, [])
+
+    # Sobrescribir: eliminar registros previos de este jugador
+    name_lower = name.lower()
+    day_list[:] = [e for e in day_list if str(e.get("name","")).lower() != name_lower]
+
+    # Insertar la nueva entrada como TOTAL del día
     day_list.append({"name": name, "points": int(amount)})
 
     _save(state)
 
-    # CSV: fecha_dia,nombre_comandante,puntos
+    # CSV: fecha_dia,nombre_comandante,puntos (se guarda el total)
     append_registro(date_key, name, int(amount))
 
-    return week_key, date_key
+    return week_key, date_key, int(amount)
 
 def weekly_summary() -> Dict[str, Any]:
     """
@@ -233,7 +239,6 @@ def weekly_summary() -> Dict[str, Any]:
         eligibles_by_day[dk] = [e["name"] for e in entries if int(e.get("points", 0)) >= THRESHOLD]
 
         # acumular para promedios por jugador (solo si tuvo registro ese día)
-        # si un jugador tiene múltiples entradas ese día, se suman
         per_player: Dict[str, int] = {}
         for e in entries:
             n = e["name"]

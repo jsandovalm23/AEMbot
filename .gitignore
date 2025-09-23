@@ -18,6 +18,7 @@ __pycache__/
 *.pyd
 
 # Entornos virtuales (si algún día lo creas dentro)
+aembot.service
 .env
 .env_example
 .venv/
