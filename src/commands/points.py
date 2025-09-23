@@ -36,7 +36,7 @@ async def points(interaction: discord.Interaction, name: str, amount: int, day: 
             gd = to_game_date(now_utc())
             when = from_game_date(gd)
 
-        if not is_game_mon_to_sat(when.date()):
+        if not is_game_mon_to_sat(when):
             return await interaction.response.send_message(
                 "VS runs **Monday–Saturday** (game-day). Choose a valid day.", ephemeral=True
             )
