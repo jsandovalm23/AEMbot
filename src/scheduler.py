@@ -20,7 +20,13 @@ from .utils.csv_utils import week_csv_names
 from .storage import append_sorteo
 from .storage import __all__ as _unused  # appease lints
 
+# 🔧 Imports requeridos por _has_weekly_draw_written (se usan fuera de funciones)
+import os, csv
+
 UTC = timezone.utc
+
+# 🔧 Ventana mínima sin escrituras antes de cualquier Auto Draw (para evitar correr con datos incompletos)
+INGEST_QUIET_MINUTES = 5
 
 EVENT_LABELS = {
     "MG": ("MG", "Marshall’s Guard / MG", 2),
@@ -56,11 +62,15 @@ class Scheduler:
 
         # 02) Auto Draw D at 00:30 server = 02:30 UTC (if no weekly draw present)
         if hhmm == "02:30" and AUTO_DRAW_D:
-            await self._maybe_auto_draw_d(gd)
+            # 🔧 Solo corre si hubo un periodo de silencio de ingesta (sin escrituras recientes)
+            if self._ingest_quiet_period_ok(INGEST_QUIET_MINUTES):
+                await self._maybe_auto_draw_d(gd)
 
         # 03) Auto Draw W at Sunday 00:30 server (02:30 UTC) if full week dataset
         if hhmm == "02:30" and gd.isoweekday() == 7 and AUTO_DRAW_W:
-            await self._maybe_auto_draw_w(gd)
+            # 🔧 Solo corre si hubo un periodo de silencio de ingesta (sin escrituras recientes)
+            if self._ingest_quiet_period_ok(INGEST_QUIET_MINUTES):
+                await self._maybe_auto_draw_w(gd)
 
         # 04) Event reminders (MG/ZS) 24h/12h/10m/5m
         for kind in ("MG", "ZS"):
@@ -173,26 +183,31 @@ class Scheduler:
     def _has_full_week_data(self, week_dt: datetime) -> bool:
         # basic check via weekly_summary to see Mon..Sat present and pool >=5
         from .storage import weekly_summary
-        s = weekly_summary(week_dt)
-        per = s.get("perDay", {})
-        days = list(per.keys())
+        s = weekly_summary()  # ← API actual: usa la semana actual de juego
+
+        per_days = s.get("days", {})  # { 'YYYYMMDD': [ ... ] }
+        days_present = list(per_days.keys())
+
         # Expect at least 6 days (Mon..Sat) present
-        if len(days) < 6:
+        if len(days_present) < 6:
             return False
+
         # Check each Mon..Sat has records
         from .utils.date_utils import game_week_monsat, yyyymmdd_from_date
         ok = True
         for d in game_week_monsat(week_dt):
-            if yyyymmdd_from_date(d) not in per:
+            if yyyymmdd_from_date(d) not in per_days:
                 ok = False
                 break
         if not ok:
             return False
-        pool = [n for n, v in s.get("averages", {}).items() if v.get("average", 0) >= 7200000]
+
+        # Pool por promedios >= 7.2M (s['averages'] ya es nombre -> número)
+        pool = [n for n, avg in s.get("averages", {}).items() if avg >= 7_200_000]
         return len(pool) >= 5
 
     async def _maybe_auto_draw_d(self, gd_today: date):
-        import os, csv, random
+        import random  # se usa localmente aquí
         # base is yesterday game-day
         base = gd_today - timedelta(days=1)
         if base.isoweekday() == 7:
@@ -200,9 +215,11 @@ class Scheduler:
         from .utils.date_utils import yyyymmdd_from_date, from_game_date
         from .storage import weekly_summary
         week_dt = from_game_date(base)
+
         # Skip if a weekly draw exists for this week
         if self._has_weekly_draw_written(week_dt):
             return
+
         # If already have D for today, skip
         today_key = yyyymmdd_from_date(gd_today)
         names = week_csv_names(week_dt)
@@ -213,11 +230,14 @@ class Scheduler:
                 for row in reader:
                     if (row.get("tipo") or "").upper() == "D" and f"for:{today_key}" in (row.get("detalle") or ""):
                         return
-        # Build eligibles from base day
-        summary = weekly_summary(week_dt)
-        eligibles = list(set(summary.get("perDay", {}).get(yyyymmdd_from_date(base), {}).get("eligible", [])))
+
+        # Build eligibles from base day (usa la clave actual 'eligibles_by_day')
+        s = weekly_summary()  # semana actual
+        base_key = yyyymmdd_from_date(base)
+        eligibles = list(set(s.get("eligibles_by_day", {}).get(base_key, [])))
         if not eligibles:
             return
+
         random.shuffle(eligibles)
         passenger = eligibles[0]
         backups = eligibles[1:3]
@@ -225,19 +245,21 @@ class Scheduler:
         append_sorteo(week_dt, "D", detail)
 
     async def _maybe_auto_draw_w(self, gd_sun: date):
-        import os, csv, random
+        import random  # se usa localmente aquí
         from .utils.date_utils import from_game_date, game_week_monsat, yyyymmdd_from_date
         week_dt = from_game_date(gd_sun)
         if self._has_weekly_draw_written(week_dt):
             return
         if not self._has_full_week_data(week_dt):
             return
+
         # Build pool by averages ≥ 7.2M
         from .storage import weekly_summary
-        s = weekly_summary(week_dt)
-        averages = [n for n, v in s.get("averages", {}).items() if v.get("average", 0) >= 7200000]
+        s = weekly_summary()  # semana actual
+        averages = [n for n, avg in s.get("averages", {}).items() if avg >= 7_200_000]
         if len(averages) < 5:
             return
+
         pool = averages.copy()
         random.shuffle(pool)
         days = game_week_monsat(week_dt)
@@ -250,3 +272,23 @@ class Scheduler:
             if pool: bks.append(pool.pop(0))
             detail = f"W|for:{yyyymmdd_from_date(d)}|passenger:{passenger}|backups:{','.join(bks)}"
             append_sorteo(week_dt, "W", detail)
+
+    # 🔧 Helper para quiet period de ingesta (señal de escrituras recientes en storage)
+    def _ingest_quiet_period_ok(self, minutes: int) -> bool:
+        """
+        Devuelve True si no ha habido escrituras recientes en el storage.
+        Usa el mtime de data.json como indicador de actividad.
+        """
+        try:
+            from .config import DATA_DIR
+            data_path = os.path.join(DATA_DIR, "data.json")
+            mtime = os.path.getmtime(data_path)
+        except FileNotFoundError:
+            # Si no existe aún el archivo, consideramos que está “quiet”
+            return True
+        except Exception:
+            # Ante cualquier error inesperado, sé conservador y no dispares el draw
+            return False
+
+        last_write = datetime.fromtimestamp(mtime, UTC)
+        return (datetime.now(UTC) - last_write) >= timedelta(minutes=minutes)

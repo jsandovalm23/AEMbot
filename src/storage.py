@@ -200,7 +200,8 @@ def register_points(name: str, amount: int, day: str | None = None) -> Tuple[str
     _save(state)
 
     # CSV: fecha_dia,nombre_comandante,puntos (se guarda el total)
-    append_registro(date_key, name, int(amount))
+    # OJO: append_registro espera una fecha (date/datetime), no un string.
+    append_registro(target, name, int(amount))
 
     return week_key, date_key, int(amount)
 
