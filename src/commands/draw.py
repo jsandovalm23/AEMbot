@@ -97,19 +97,31 @@ async def draw_d(interaction: discord.Interaction):
         f"• Backups: {', '.join(f'**{b}**' for b in backups)}"
     )
 
-
-# ---------- Draw W (weekly) — averages Mon–Sat, only after event ends ----------
+# ---------- Draw W (weekly) — averages Mon–Sat, after event ends (Sun) or Monday grace ----------
 async def draw_w(interaction: discord.Interaction):
     now_dt = now_utc()
     current_gd = to_game_date(now_dt)
+    wd = current_gd.isoweekday()  # 1=Mon ... 7=Sun
 
-    if current_gd.isoweekday() != 7:
+    # Caso A: Domingo → usar la semana que terminó ese día y asignar para la siguiente semana
+    if wd == 7:
+        ref_gd_for_summary = current_gd
+        target_week_start = from_game_date(current_gd) + timedelta(weeks=1)
+
+    # Caso B: Lunes (día de gracia) → usar la semana anterior y asignar para esta semana
+    elif wd == 1:
+        ref_gd_for_summary = current_gd - timedelta(days=1)
+        target_week_start = from_game_date(current_gd)
+
+    # Cualquier otro día → rechazar
+    else:
         return await interaction.response.send_message(
-            "**Draw W** can only be executed **after the event ends** (game Sunday).",
+            "**Draw W** can only be executed **after the event ends** (game Sunday) or on **game Monday** as a grace day.",
             ephemeral=True,
         )
 
-    summary = weekly_summary()
+    # Obtener resumen de la semana de referencia
+    summary = weekly_summary(ref_gd_for_summary)
     pool = [name for name, avg in summary.get("averages", {}).items() if avg >= THRESHOLD]
 
     # 🚫 excluir nombres de train
@@ -118,15 +130,17 @@ async def draw_w(interaction: discord.Interaction):
     if len(pool) < 5:
         return await interaction.response.send_message("Not enough average-eligibles (≥ 7.2M) to assign 5 passengers.")
 
-    next_week_days = game_week_monfri(from_game_date(current_gd) + timedelta(weeks=1))
+    # Días destino (Lun–Vie)
+    next_week_days = game_week_monfri(target_week_start)
+
     random.shuffle(pool)
     picks = []
     available = pool[:]
     for i in range(5):
         passenger = available.pop(0)
-        backups = [available.pop(0)] if available else []
-        if available:
-            backups.append(available.pop(0))
+        backups = []
+        if available: backups.append(available.pop(0))
+        if available: backups.append(available.pop(0))
         picks.append({"day": next_week_days[i], "passenger": passenger, "backups": backups})
 
     for p in picks:
@@ -137,4 +151,5 @@ async def draw_w(interaction: discord.Interaction):
         f"• {p['day'].strftime('%A %d/%m')}: passenger **{p['passenger']}**, backups {', '.join(f'**{b}**' for b in p['backups'])}"
         for p in picks
     )
-    await interaction.response.send_message(f"🎲 **Draw W** (for **next week Mon–Fri**):\n{lines}")
+    when_txt = "for next week Mon–Fri" if wd == 7 else "for this week Mon–Fri"
+    await interaction.response.send_message(f"🎲 **Draw W** ({when_txt}):\n{lines}")

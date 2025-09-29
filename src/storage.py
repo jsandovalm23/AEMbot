@@ -148,15 +148,18 @@ _DAY_OFFSETS = {
     "lun": 0, "mar": 1, "mie": 2, "mié": 2, "jue": 3, "vie": 4, "sab": 5, "sáb": 5,
 }
 
-def register_points(name: str, amount: int, day: str | None = None) -> Tuple[str, str, int]:
+def register_points(name: str, amount: int, day: str | None = None, ref_date: date | datetime | None = None) -> Tuple[str, str, int]:
     """
-    Registra puntos para un jugador en la semana ISO actual (modelo de juego).
+    Registra puntos para un jugador en la semana ISO del calendario de juego, con opción de
+    referenciar explícitamente la semana (ref_date) para cerrar rezagos en domingo/lunes.
     - name: nombre del jugador (del juego)
     - amount: puntos enteros (se guarda como TOTAL del día)
     - day: opcional ('mon'..'sat' o abreviatura ES). Si None, usa el día de juego actual.
+    - ref_date: opcional (date/datetime). Si se provee, esa fecha define la semana de juego destino.
     Reglas:
-      * El evento VS corre de lun–sáb. El domingo puede registrar para lun–sáb de la semana actual.
-      * Siempre se registra en la semana ISO actual (lunes–domingo) usando calendario del juego (corte 02:00 UTC).
+      * El evento VS corre de lun–sáb. El domingo puede registrar para lun–sáb de la semana que finaliza ese mismo domingo.
+      * El lunes aún puede registrar para la semana pasada (cierre), pero nunca para futuro.
+      * Siempre se registra en la semana ISO del calendario del juego derivada de ref_date (si se pasa) o del "ahora".
     Devuelve (week_key, yyyymmdd_del_registro, total_del_dia)
     """
     if not isinstance(amount, int):
@@ -165,8 +168,16 @@ def register_points(name: str, amount: int, day: str | None = None) -> Tuple[str
     state = _load()
     _ensure_points(state)
 
-    now = datetime.now(UTC)
-    game_today = to_game_date(now)  # fecha en calendario del juego (corte 02:00 UTC)
+    # Base temporal: ahora o ref_date (si viene)
+    if ref_date is None:
+        now = datetime.now(UTC)
+    else:
+        if isinstance(ref_date, datetime):
+            now = ref_date.astimezone(UTC)
+        else:
+            now = datetime.combine(ref_date, time(0, 0, tzinfo=UTC))
+
+    game_today = to_game_date(now)          # fecha en calendario del juego (corte 02:00 UTC)
     monday = _monday_of_game_week(game_today)
 
     # Determinar fecha efectiva
@@ -177,12 +188,12 @@ def register_points(name: str, amount: int, day: str | None = None) -> Tuple[str
         offset = _DAY_OFFSETS[key]
         target = monday + timedelta(days=offset)
     else:
-        # usar el día de juego actual
+        # usar el día de juego base (derivado de now/ref_date)
         target = game_today
 
     # Limitar a lun–sáb siempre (domingo no es día válido del VS)
     if target.isoweekday() == 7:
-        raise ValueError("VS runs Mon–Sat; use a Mon–Sat day key when registering on Sunday.")
+        raise ValueError("VS runs Mon–Sat; Sunday is not a valid VS day.")
 
     week_key = _iso_week_key(target)
     date_key = yyyymmdd_from_date(target)
@@ -200,15 +211,15 @@ def register_points(name: str, amount: int, day: str | None = None) -> Tuple[str
     _save(state)
 
     # CSV: fecha_dia,nombre_comandante,puntos (se guarda el total)
-    # OJO: append_registro espera una fecha (date/datetime), no un string.
     dt_utc = datetime.combine(target, time(0, 0, tzinfo=UTC))
     append_registro(dt_utc, name, int(amount))
 
     return week_key, date_key, int(amount)
 
-def weekly_summary() -> Dict[str, Any]:
+def weekly_summary(ref_date: datetime | date | None = None) -> Dict[str, Any]:
     """
-    Devuelve un resumen de la semana actual (calendario del juego):
+    Devuelve un resumen de la semana del calendario de juego que contiene ref_date.
+    Si ref_date es None, usa la semana actual.
       {
         'week': 'YYYY-WW',
         'days': { 'YYYYMMDD': [{'name':..., 'points':...}, ...], ... },
@@ -220,8 +231,15 @@ def weekly_summary() -> Dict[str, Any]:
     state = _load()
     _ensure_points(state)
 
-    now = datetime.now(UTC)
-    game_today = to_game_date(now)
+    if ref_date is None:
+        base_dt = datetime.now(UTC)
+    else:
+        if isinstance(ref_date, datetime):
+            base_dt = ref_date.astimezone(UTC)
+        else:
+            base_dt = datetime.combine(ref_date, time(0, 0, tzinfo=UTC))
+
+    game_today = to_game_date(base_dt)
     monday = _monday_of_game_week(game_today)
     week_key = _iso_week_key(game_today)
 
@@ -236,11 +254,8 @@ def weekly_summary() -> Dict[str, Any]:
         d = monday + timedelta(days=i)
         dk = yyyymmdd_from_date(d)
         entries = days.get(dk, [])
-
-        # elegibles del día
         eligibles_by_day[dk] = [e["name"] for e in entries if int(e.get("points", 0)) >= THRESHOLD]
 
-        # acumular para promedios por jugador (solo si tuvo registro ese día)
         per_player: Dict[str, int] = {}
         for e in entries:
             n = e["name"]
