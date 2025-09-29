@@ -11,9 +11,8 @@ from ..utils.date_utils import (
     to_game_date,
     from_game_date,
     yyyymmdd_from_date,
-    game_week_monfri,
 )
-from ..utils.csv_utils import append_sorteo, week_csv_names
+from ..utils.csv_utils import append_sorteo
 from ..storage import weekly_summary
 
 
@@ -22,118 +21,144 @@ def has_role(member: discord.Member) -> bool:
     return any(r in names for r in ROLE_ADMIN + ROLE_OFFICIAL)
 
 
-def _collect_mon_fri_assignments(write_week_ref_dt):
-    """
-    Lee del CSV de la *semana de escritura* (domingo de cierre actual) todas las
-    asignaciones planificadas para Lun–Vie de la *semana siguiente* (for:YYYYMMDD),
-    y devuelve un conjunto de nombres (passenger y backups) para excluirlos del fin de semana.
-    """
-    excluded = set()
-    names = week_csv_names(write_week_ref_dt)
-    path = names["sorteos"]
-    if not os.path.exists(path):
-        return excluded
-
-    # Queremos Mon–Vie de la semana SIGUIENTE a write_week_ref_dt.
-    next_week_ref_dt = write_week_ref_dt + timedelta(days=7)
-    mon_fri_dates = {d.strftime("%Y%m%d") for d in game_week_monfri(next_week_ref_dt)}
-
-    with open(path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            detalle = (row.get("detalle") or "").strip()
-            try:
-                parts = [p for p in detalle.split("|") if ":" in p]
-                kv = {p.split(":", 1)[0]: p.split(":", 1)[1] for p in parts}
-                for_date = kv.get("for")
-                if for_date and for_date in mon_fri_dates:
-                    # Excluir passenger y backups (ambos formatos: "backups" o "passenger_backups")
-                    if "passenger" in kv and kv["passenger"]:
-                        excluded.add(kv["passenger"])
-                    if "backups" in kv and kv["backups"]:
-                        for b in kv["backups"].split(","):
-                            b = b.strip()
-                            if b:
-                                excluded.add(b)
-                    if "passenger_backups" in kv and kv["passenger_backups"]:
-                        for b in kv["passenger_backups"].split(","):
-                            b = b.strip()
-                            if b:
-                                excluded.add(b)
-            except Exception:
-                continue
-    return excluded
-
-
-@app_commands.command(name="weekend_roles", description="Assign Driver+backup and Passenger+backups for both Saturday and Sunday (no params)")
+@app_commands.command(
+    name="weekend_roles",
+    description="Assign Driver+backup and Passenger+backups for both Saturday and Sunday (no params)"
+)
 async def weekend_roles(interaction: discord.Interaction):
     if not isinstance(interaction.user, discord.Member) or not has_role(interaction.user):
-        return await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
+        return await interaction.response.send_message(
+            "You don't have permission to use this command.",
+            ephemeral=True
+        )
 
+    # -------------------------------
+    # 1) Base temporal en calendario de juego
+    # -------------------------------
     nowdt = now_utc()
     cur_gd = to_game_date(nowdt)
+    cur_wd = cur_gd.isoweekday()  # 1=Mon ... 7=Sun
 
-    # Semana de escritura = semana del domingo de cierre actual (p.ej. 2025-09-21)
-    write_week_dt = from_game_date(cur_gd)
+    # Domingo PREVIO a la semana actual del calendario de juego:
+    #  - Si hoy es domingo, este mismo domingo es el cierre de la semana que acaba de terminar (L–S).
+    #  - Si hoy es lunes, tomamos el domingo inmediatamente anterior (ayer) para usar los promedios L–S cerrados.
+    monday_game = cur_gd - timedelta(days=(cur_wd - 1))
+    prev_sunday_game = monday_game - timedelta(days=1)
+    prev_sunday_real = from_game_date(prev_sunday_game)
 
-    # Pool de promedios de la semana que acaba de terminar (se calcula con write_week_dt)
-    summary = weekly_summary(write_week_dt)
-    averages = [(n, v.get("average", 0)) for n, v in summary.get("averages", {}).items() if v.get("average", 0) >= THRESHOLD]
+    # -------------------------------
+    # 2) Pool de promedios (semana L–S recién cerrada)
+    #    - averages: { name: average_float } calculado sobre 6 días fijos (Mon–Sat)
+    # -------------------------------
+    summary = weekly_summary(prev_sunday_real)
+    aver_map = summary.get("averages", {}) or {}
+    averages = [(name, float(avg)) for name, avg in aver_map.items() if float(avg) >= THRESHOLD]
+
     if len(averages) < 4:
-        return await interaction.response.send_message("Need at least 4 average-eligibles to assign without repeats.", ephemeral=True)
+        return await interaction.response.send_message(
+            "Need at least 4 average-eligibles to assign without repeats.",
+            ephemeral=True
+        )
 
+    # Drivers salen del Top-10 por promedio; Passengers del pool completo (>= THRESHOLD) al azar.
     averages.sort(key=lambda x: x[1], reverse=True)
-    top10 = [n for n, _ in averages[:10]]     # Para Driver
-    avg_pool_all = [n for n, _ in averages]   # Para Passenger
+    top10 = [n for n, _ in averages[:10]]     # para Driver
+    avg_pool_all = [n for n, _ in averages]   # para Passenger
 
-    # Excluir Mon–Vie de la SEMANA SIGUIENTE (22–26) leyendo del mismo CSV (Vs<domingo actual>)
-    excluded_mon_fri = _collect_mon_fri_assignments(write_week_dt)
-
-    # Objetivos del fin de semana (Sábado y Domingo de la semana siguiente)
-    # Calculados desde el game-day actual para obtener 6=Sat, 7=Sun de la semana en curso;
-    # si hoy es domingo, offset=6 y 7 nos llevan al finde de la semana siguiente.
+    # -------------------------------
+    # 3) Fechas objetivo: Sábado y Domingo de la SEMANA SIGUIENTE
+    #    (si hoy es domingo, empujamos 7 días para el próximo finde)
+    # -------------------------------
     targets = []
-    for wd in (6, 7):  # Saturday, Sunday (game weekday)
+    for wd in (6, 7):  # Saturday (6), Sunday (7)
         offset = wd - cur_gd.isoweekday()
         if offset <= 0:
-            # Si es Dom (7), offset=0 -> es hoy; para tomar el próximo finde, avanzamos 7 días
+            # si hoy es dom (7), offset=0 → empujar 7 días
             offset += 7
         target_gd = cur_gd + timedelta(days=offset)
         targets.append(target_gd)
 
-    results = []
+    results: list[tuple[int, str, str, str, list[str]]] = []
+
+    # Evitar repetidos entre sábado y domingo (pasajeros, backups y drivers)
+    used_across_weekend: set[str] = set()  # comparar en minúsculas
+
+    # -------------------------------
+    # 4) Asignación por día (Sábado y Domingo)
+    # -------------------------------
     for target_gd in targets:
-        # Passenger del pool de promedios, excluyendo Mon–Vie ya asignados
-        passenger_candidates = [n for n in avg_pool_all if n not in excluded_mon_fri]
+        # Passenger:
+        #  - azar total entre todos >= THRESHOLD
+        #  - NO excluimos quienes estén en Mon–Vie (permitido repetir con L–V)
+        #  - sí evitamos repetidos entre sábado y domingo (used_across_weekend)
+        passenger_candidates = [n for n in avg_pool_all if n.lower() not in used_across_weekend]
         if not passenger_candidates:
-            return await interaction.response.send_message("No available passenger candidates after excluding Mon–Fri selections.", ephemeral=True)
+            return await interaction.response.send_message(
+                "No available passenger candidates for weekend (after removing cross-weekend repeats).",
+                ephemeral=True
+            )
         random.shuffle(passenger_candidates)
         passenger = passenger_candidates.pop(0)
-        passenger_backups = []
+
+        # Backups de passenger (también evitando repetidos del mismo fin de semana)
+        passenger_backups: list[str] = []
+        passenger_candidates = [n for n in passenger_candidates if n.lower() not in used_across_weekend]
         if passenger_candidates:
             passenger_backups.append(passenger_candidates.pop(0))
+        passenger_candidates = [n for n in passenger_candidates if n.lower() not in used_across_weekend]
         if passenger_candidates:
             passenger_backups.append(passenger_candidates.pop(0))
 
-        # Driver del Top-10, distinto del passenger y sus backups (puede repetir con Mon–Vie)
-        driver_pool = [n for n in top10 if n not in {passenger, *passenger_backups}]
+        # Evitar colisión driver/passenger del mismo día
+        used_lower_day = {passenger.lower(), *(b.lower() for b in passenger_backups)}
+
+        # Driver:
+        #  - del Top-10
+        #  - distinto del passenger/backups del día
+        #  - distinto de cualquiera ya usado en el fin de semana (acumulado)
+        driver_pool = [
+            n for n in top10
+            if n.lower() not in used_lower_day and n.lower() not in used_across_weekend
+        ]
         if len(driver_pool) < 2:
-            return await interaction.response.send_message("Not enough distinct Top-10 candidates to assign driver and backup.", ephemeral=True)
+            return await interaction.response.send_message(
+                "Not enough distinct Top-10 candidates to assign driver and backup.",
+                ephemeral=True
+            )
         random.shuffle(driver_pool)
         driver = driver_pool.pop(0)
         driver_backup = driver_pool.pop(0)
 
-        # Guardar en el CSV del DOMINGO ACTUAL (domingo de cierre, p.ej. Vs20250921_sorteos.csv)
+        # Marcar todos como usados para el resto del fin de semana
+        used_across_weekend.update({
+            passenger.lower(),
+            *(b.lower() for b in passenger_backups),
+            driver.lower(),
+            driver_backup.lower(),
+        })
+
+        # -------------------------------
+        # 5) Guardado: CSV del DOMINGO DE LA SEMANA DEL TARGET
+        #    - Monday de la semana de juego de target_gd + 6 → Sunday (game)
+        #    - Convertir a fecha “real” (from_game_date) para que week_csv_names
+        #      apunte a VsYYYYMMDD_sorteos.csv correcto (el que usa train_show).
+        # -------------------------------
+        week_monday_game = target_gd - timedelta(days=(target_gd.isoweekday() - 1))
+        target_week_sunday_game = week_monday_game + timedelta(days=6)
+        write_ref_dt = from_game_date(target_week_sunday_game)
+
         detail = (
             f"weekend|for:{yyyymmdd_from_date(target_gd)}|"
             f"driver:{driver}|driver_backup:{driver_backup}|"
             f"passenger:{passenger}|passenger_backups:{','.join(passenger_backups)}"
         )
-        append_sorteo(write_week_dt, "weekend", detail)
+        append_sorteo(write_ref_dt, "weekend", detail)
 
         results.append((target_gd.isoweekday(), driver, driver_backup, passenger, passenger_backups))
 
-    # Mensaje
+    # -------------------------------
+    # 6) Mensaje final
+    # -------------------------------
     day_name = {6: "Saturday", 7: "Sunday"}
     lines = []
     for wd, driver, driver_backup, passenger, passenger_backups in results:

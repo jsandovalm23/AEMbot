@@ -19,7 +19,7 @@ from typing import Optional, Tuple, Dict
 
 from ..config import ROLE_ADMIN, ROLE_OFFICIAL
 from ..storage import set_train_config, get_train_config
-from ..utils.date_utils import to_game_date, from_game_date
+from ..utils.date_utils import to_game_date, from_game_date, now_utc
 from ..utils.train_utils import driver_for_day, read_draw_for_date
 from ..utils.csv_utils import week_csv_names
 
@@ -74,6 +74,12 @@ def _prev_sunday_ref(d: date) -> datetime:
     prev_sunday = monday - timedelta(days=1)
     return _utc_from_date(prev_sunday)
 
+def _next_sunday_ref(d: date) -> datetime:
+    # Sunday al final de la semana de `d` (Monday=0)
+    monday = d - timedelta(days=d.weekday())
+    next_sunday = monday + timedelta(days=6)
+    return _utc_from_date(next_sunday)
+
 def _this_week_ref(d: date) -> datetime:
     return _utc_from_date(d)
 
@@ -114,6 +120,44 @@ def _read_weekend_for_date(real_day: date) -> Tuple[Optional[str], Optional[str]
             continue
     return (None, None, None, None)
 
+def _read_weekday_from_csv(real_day: date) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Fallback para Mon–Fri: lee CSV de sorteos y encuentra pasajero/backups para 'real_day'
+    buscando entradas tipo W/D con for:YYYYMMDD.
+    Orden de búsqueda:
+      1) CSV del domingo siguiente a 'real_day'  (propio de Draw W)
+      2) CSV del domingo previo                   (por compatibilidad)
+      3) CSV "de esta semana"                     (compatibilidad adicional)
+    Devuelve: (passenger, first_backup) o (None, None).
+    """
+    target = real_day.strftime("%Y%m%d")
+    for ref in (_next_sunday_ref(real_day), _prev_sunday_ref(real_day), _this_week_ref(real_day)):
+        path = _csv_path_for(ref)
+        if not path:
+            continue
+        if not __import__('os').path.exists(path):
+            continue
+        try:
+            import csv
+            with open(path, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    tipo = (row.get("tipo") or "").strip().lower()
+                    if tipo not in ("w", "d"):
+                        continue
+                    kv = _parse_pipe_kv(row.get("detalle") or "")
+                    if kv.get("for") == target:
+                        pax = (kv.get("passenger") or "").strip()
+                        backs = (kv.get("backups") or kv.get("passenger_backups") or "").strip()
+                        b1 = None
+                        if backs:
+                            first = (backs.split(",")[0] or "").strip()
+                            b1 = first or None
+                        return pax or None, b1
+        except Exception:
+            continue
+    return (None, None)
+
 def _format_day_line(day_real: date, driver: Optional[str], pax: Optional[str], bkp: Optional[str], weekend=False,
                      drv_wk: Optional[str]=None, pax_wk: Optional[str]=None) -> str:
     # driver/pax “Pending” si no hay
@@ -144,7 +188,11 @@ def _build_week_block(drivers: list[str], anchor_base: date, week_monday_game: d
         drv = drv if (drv and isinstance(drv, str) and drv.strip()) else "Pending"
         # pasajero desde CSV (D/W por lógica de train_utils.read_draw_for_date)
         pax, bkp = read_draw_for_date(day_real)
+        if not pax:
+            # Fallback: buscar directamente en CSV considerando Draw W (domingo siguiente)
+            pax, bkp = _read_weekday_from_csv(day_real)
         lines.append(_format_day_line(day_real, drv, pax, bkp))
+
 
     # Sat/Sun (desde weekend CSV si existe)
     for i in (5, 6):
@@ -241,7 +289,7 @@ async def train_show(interaction: discord.Interaction, mode: app_commands.Choice
     anchor_iso = cfg.get("anchor_monday")
 
     # Día de juego actual (cambia 02:00 UTC)
-    game_today = to_game_date(discord.utils.utcnow().replace(tzinfo=None))
+    game_today = to_game_date(now_utc())
     week_monday_game = game_today - timedelta(days=(game_today.isoweekday() - 1))
 
     # Anchor fijo para ambos bloques:
@@ -259,6 +307,9 @@ async def train_show(interaction: discord.Interaction, mode: app_commands.Choice
             drv = driver_for_day(drivers, anchor_base, day_game)
             drv = drv if (drv and drv.strip()) else "Pending"
             pax, bkp = read_draw_for_date(day_real)
+            if not pax:
+                # Fallback: considerar Draw W (CSV del domingo siguiente)
+                pax, bkp = _read_weekday_from_csv(day_real)
             line = _format_day_line(day_real, drv, pax, bkp)
         else:
             drv_wk, drv_bk_wk, pax_wk, pax_b1_wk = _read_weekend_for_date(day_real)
@@ -277,6 +328,9 @@ async def train_show(interaction: discord.Interaction, mode: app_commands.Choice
             drv = driver_for_day(drivers, anchor_for_next, day_game)
             drv = drv if (drv and drv.strip()) else "Pending"
             pax, bkp = read_draw_for_date(day_real)
+            if not pax:
+                # Fallback: considerar Draw W (CSV del domingo siguiente)
+                pax, bkp = _read_weekday_from_csv(day_real)
             line = _format_day_line(day_real, drv, pax, bkp)
         else:
             drv_wk, drv_bk_wk, pax_wk, pax_b1_wk = _read_weekend_for_date(day_real)

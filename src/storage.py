@@ -11,6 +11,84 @@ from datetime import datetime, timedelta, timezone, date, time
 from .config import DATA_DIR, THRESHOLD
 UTC = timezone.utc
 
+# -------------------- name matching helpers (sin alias fijos) --------------------
+# Objetivo:
+#  - Tratar como iguales nombres que solo difieren en mayúsculas/espacios.
+#  - Reconciliar typos ASCII MUY leves (distancia de edición <= 1) cuando comparten 1er/último alfanumérico,
+#    p. ej. "ChikenLobo" vs "ChickenLobo", "Lnhrf" vs "Lnhrs".
+#  - Mantener separados nombres con caracteres no ASCII (p. ej. "ANGELO" vs "ANGELØ").
+
+def _collapse_spaces(s: str) -> str:
+    return " ".join((s or "").strip().split())
+
+def _canonical_key(s: str) -> str:
+    # casefold (robusto) + colapso de espacios. NO quitamos diacríticos.
+    return _collapse_spaces(str(s)).casefold()
+
+def _is_ascii(s: str) -> bool:
+    try:
+        return str(s).isascii()
+    except Exception:
+        return all(ord(ch) < 128 for ch in str(s))
+
+def _levenshtein(a: str, b: str) -> int:
+    a, b = str(a), str(b)
+    if a == b:
+        return 0
+    la, lb = len(a), len(b)
+    if la == 0: return lb
+    if lb == 0: return la
+    prev = list(range(lb + 1))
+    for i, ca in enumerate(a, 1):
+        curr = [i]
+        for j, cb in enumerate(b, 1):
+            ins = curr[j-1] + 1
+            dele = prev[j] + 1
+            sub = prev[j-1] + (0 if ca == cb else 1)
+            curr.append(min(ins, dele, sub))
+        prev = curr
+    return prev[-1]
+
+def _first_last_alnum_equal(a: str, b: str) -> bool:
+    import re
+    ra = re.findall(r"[A-Za-z0-9]", a)
+    rb = re.findall(r"[A-Za-z0-9]", b)
+    if not ra or not rb:
+        return False
+    return (ra[0].casefold() == rb[0].casefold()) and (ra[-1].casefold() == rb[-1].casefold())
+
+def _names_equivalent(a: str, b: str) -> bool:
+    """
+    Reglas:
+      1) Igualdad por casefold + espacios (independiente de mayúsculas y dobles espacios).
+      2) Si AMBOS son ASCII y min(len)>=5 y comparten primer/último alfanumérico,
+         aceptamos Levenshtein <= 1 (corrige typos muy leves).
+      3) Si alguno NO es ASCII (p. ej. 'Ø'), solo aceptamos igualdad exacta case-insensitive.
+    """
+    if _canonical_key(a) == _canonical_key(b):
+        return True
+    if _is_ascii(a) and _is_ascii(b):
+        aa, bb = _collapse_spaces(a), _collapse_spaces(b)
+        if min(len(aa), len(bb)) >= 5 and _first_last_alnum_equal(aa, bb):
+            return _levenshtein(aa.casefold(), bb.casefold()) <= 1
+    return False
+
+def _pick_display_name(a: str, b: str) -> str:
+    """
+    Al fusionar 'a' y 'b', elegimos un nombre para mostrar:
+      - Preferimos el que tenga más caracteres alfabéticos.
+      - Empate: preferimos el más largo.
+      - Último recurso: 'a'.
+    """
+    import re
+    na = len(re.findall(r"[A-Za-z]", a or ""))
+    nb = len(re.findall(r"[A-Za-z]", b or ""))
+    if nb > na:
+        return b
+    if nb == na and len(b or "") > len(a or ""):
+        return b
+    return a
+
 DATA_JSON = os.path.join(DATA_DIR, "data.json")
 
 # -------------------- core load/save --------------------
@@ -201,18 +279,28 @@ def register_points(name: str, amount: int, day: str | None = None, ref_date: da
     week_bucket = state["points"].setdefault(week_key, {})
     day_list: List[Dict[str, Any]] = week_bucket.setdefault(date_key, [])
 
-    # Sobrescribir: eliminar registros previos de este jugador
-    name_lower = name.lower()
-    day_list[:] = [e for e in day_list if str(e.get("name","")).lower() != name_lower]
+    # Sobrescribir: eliminar registros previos equivalentes a este jugador (reglas lógicas)
+    existing_display = None
+    to_keep = []
+    for e in day_list:
+        ename = str(e.get("name", ""))
+        if _names_equivalent(ename, name):
+            existing_display = ename if existing_display is None else _pick_display_name(existing_display, ename)
+            # omitimos este registro (lo reemplazaremos)
+        else:
+            to_keep.append(e)
+    day_list[:] = to_keep
+
+    display_name = existing_display or _collapse_spaces(name)
 
     # Insertar la nueva entrada como TOTAL del día
-    day_list.append({"name": name, "points": int(amount)})
+    day_list.append({"name": display_name, "points": int(amount)})
 
     _save(state)
 
     # CSV: fecha_dia,nombre_comandante,puntos (se guarda el total)
     dt_utc = datetime.combine(target, time(0, 0, tzinfo=UTC))
-    append_registro(dt_utc, name, int(amount))
+    append_registro(dt_utc, display_name, int(amount))
 
     return week_key, date_key, int(amount)
 
@@ -254,17 +342,63 @@ def weekly_summary(ref_date: datetime | date | None = None) -> Dict[str, Any]:
         d = monday + timedelta(days=i)
         dk = yyyymmdd_from_date(d)
         entries = days.get(dk, [])
-        eligibles_by_day[dk] = [e["name"] for e in entries if int(e.get("points", 0)) >= THRESHOLD]
 
-        per_player: Dict[str, int] = {}
+        # Consolida duplicados obvios del MISMO día (case/espacios/typo ASCII leve).
+        per_day_merged: Dict[str, int] = {}
+        per_day_display: Dict[str, str] = {}  # clave interna -> display consolidado
+
         for e in entries:
-            n = e["name"]
-            per_player[n] = per_player.get(n, 0) + int(e.get("points", 0))
-        for n, p in per_player.items():
-            sums[n] = sums.get(n, 0) + p
-            counts[n] = counts.get(n, 0) + 1
+            raw_name = str(e.get("name", ""))
+            pts = int(e.get("points", 0))
 
-    averages = {n: (sums[n] / counts[n]) for n in sums.keys() if counts.get(n, 0) > 0}
+            hit_key = None
+            for k in per_day_display.keys():
+                if _names_equivalent(k, raw_name):
+                    hit_key = k
+                    break
+            if hit_key is None:
+                per_day_display[raw_name] = _collapse_spaces(raw_name)
+                per_day_merged[raw_name] = pts
+            else:
+                new_disp = _pick_display_name(per_day_display[hit_key], raw_name)
+                if new_disp != per_day_display[hit_key]:
+                    per_day_display[hit_key] = new_disp
+                per_day_merged[hit_key] = per_day_merged.get(hit_key, 0) + pts
+
+        # elegibles del día (usando displays consolidados)
+        eligibles_by_day[dk] = [
+            per_day_display[k]
+            for k, v in per_day_merged.items()
+            if int(v) >= THRESHOLD
+        ]
+
+        # acumular para promedios por jugador (fusión a nivel de semana)
+        for k, v in per_day_merged.items():
+            disp = per_day_display[k]
+            hit_week = None
+            for wk in list(sums.keys()):
+                if _names_equivalent(wk, disp):
+                    hit_week = wk
+                    break
+            if hit_week is None:
+                sums[disp] = int(v)
+            else:
+                new_disp = _pick_display_name(hit_week, disp)
+                if new_disp != hit_week:
+                    sums[new_disp] = sums.pop(hit_week)
+                    if hit_week in counts:
+                        counts[new_disp] = counts.pop(hit_week)
+                    hit_week = new_disp
+                sums[hit_week] = sums.get(hit_week, 0) + int(v)
+
+            # contamos el día si tuvo registro (para referencia); el promedio final divide entre 6 fijos
+            counts[disp] = counts.get(disp, 0) + 1
+
+    # Promedios sobre 6 días fijos (Mon–Sat). Días sin registro cuentan como 0.
+    if sums:
+        averages = {n: (sums[n] / 6.0) for n in sums.keys()}
+    else:
+        averages = {}
 
     return {
         "week": week_key,
