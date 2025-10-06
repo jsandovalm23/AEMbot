@@ -2,9 +2,10 @@
 # src/commands/draw.py  (W and D)
 # ===============================
 import random
-from datetime import datetime, timedelta, timezone, time
+import os, csv
 import discord
 from discord import app_commands
+from datetime import datetime, timedelta, timezone, time, date
 from ..config import ROLE_ADMIN, ROLE_OFFICIAL, THRESHOLD
 from ..utils.date_utils import (
     now_utc,
@@ -47,6 +48,45 @@ async def draw(interaction: discord.Interaction, kind: app_commands.Choice[str])
     else:
         return await draw_w(interaction)
 
+def _parse_pipe_kv(detail: str) -> dict[str, str]:
+    # "W|for:YYYYMMDD|passenger:Foo Bar|backups:A,B" -> {"for":"...","passenger":"...","backups":"A,B"}
+    s = detail or ""
+    if "|" in s and (s.startswith("W|") or s.startswith("D|") or s.startswith("weekend|")):
+        s = s.split("|", 1)[1]
+    out = {}
+    for part in s.split("|"):
+        if ":" in part:
+            k, v = part.split(":", 1)
+            out[k.strip().lower()] = v.strip()
+    return out
+
+def _exclude_last_week_W_passengers(target_week_monday_real: date) -> set[str]:
+    """
+    Lee el CSV de la semana inmediatamente anterior (el del domingo previo)
+    y devuelve los nombres que salieron como passenger en líneas tipo 'W'.
+    """
+    from datetime import datetime, timezone, timedelta
+    from ..utils.csv_utils import week_csv_names
+    UTC = timezone.utc
+
+    prev_sunday_real = target_week_monday_real - timedelta(days=1)  # domingo anterior
+    csv_path = week_csv_names(datetime(prev_sunday_real.year, prev_sunday_real.month, prev_sunday_real.day, tzinfo=UTC))["sorteos"]
+    out: set[str] = set()
+    if not csv_path or not os.path.exists(csv_path):
+        return out
+    try:
+        with open(csv_path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if (row.get("tipo") or "").strip().upper() != "W":
+                    continue
+                kv = _parse_pipe_kv(row.get("detalle") or "")
+                p = (kv.get("passenger") or "").strip()
+                if p:
+                    out.add(p)
+    except Exception:
+        pass
+    return out
 
 # ---------- Draw D (daily) — previous game-day elegibles → next assignment ----------
 async def draw_d(interaction: discord.Interaction):
@@ -132,6 +172,16 @@ async def draw_w(interaction: discord.Interaction):
 
     # Días destino (Lun–Vie)
     next_week_days = game_week_monfri(target_week_start)
+
+    # 🚫 excluir PASAJEROS que ya salieron en el W de la semana anterior
+    target_week_monday_real = target_week_start  # ya es real-world Monday para la semana destino
+    exclude_prev_w = _exclude_last_week_W_passengers(target_week_monday_real)
+    pool = [n for n in pool if n not in exclude_prev_w]
+
+    if len(pool) < 5:
+        return await interaction.response.send_message(
+            "Not enough average-eligibles after excluding last week's W passengers (need 5)."
+        )
 
     random.shuffle(pool)
     picks = []

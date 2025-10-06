@@ -77,13 +77,9 @@ async def points(interaction: discord.Interaction, name: str, amount: int, day: 
                 target_gd = monday_gd + timedelta(days=(desired_idx - 1))
             elif current_wd == 1:
                 # Lunes:
-                # - Si pides un día "por delante" (future w.r.t Monday), se toma el mismo día pero de la semana pasada.
-                # - Si pides Monday, es hoy (semana actual).
-                if desired_idx > current_wd:
-                    prev_monday_gd = monday_gd - timedelta(days=7)
-                    target_gd = prev_monday_gd + timedelta(days=(desired_idx - 1))
-                else:
-                    target_gd = monday_gd + timedelta(days=(desired_idx - 1))
+                # - Todo lo que se registre en lunes (Mon–Sat) pertenece a la semana pasada.
+                prev_monday_gd = monday_gd - timedelta(days=7)
+                target_gd = prev_monday_gd + timedelta(days=(desired_idx - 1))
             else:
                 # Mar–Sáb: solo semana ACTUAL y nunca futuro.
                 if desired_idx > current_wd:
